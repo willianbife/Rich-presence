@@ -147,15 +147,20 @@ class StatusBadge(QLabel):
 
 class AnimatedStackMixin:
     def fade_in_widget(self, widget: QWidget) -> None:
-        effect = widget.graphicsEffect()
-        if effect is None:
-            from PySide6.QtWidgets import QGraphicsOpacityEffect
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
 
-            effect = QGraphicsOpacityEffect(widget)
-            widget.setGraphicsEffect(effect)
+        # Remove previous effect if any to ensure a clean start
+        widget.setGraphicsEffect(None)
+        
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        
         animation = QPropertyAnimation(effect, b"opacity", widget)
-        animation.setStartValue(0.2)
+        animation.setStartValue(0.0)
         animation.setEndValue(1.0)
-        animation.setDuration(220)
+        animation.setDuration(250)
         animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+        # Crucial: Remove effect after animation to prevent rendering artifacts/ghosting in transparent windows
+        animation.finished.connect(lambda: widget.setGraphicsEffect(None))
         animation.start(QPropertyAnimation.DeleteWhenStopped)

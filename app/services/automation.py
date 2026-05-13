@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, time as clock_time
+import threading
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.core.models import PresenceConfig, Preset
 from app.utils.logger import logger
+from app.services.game_integration import GameIntegrationService
 
 
 class SafeAutomationService(QObject):
@@ -19,11 +21,14 @@ class SafeAutomationService(QObject):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._rotate)
         self._process_timer = QTimer(self)
-        self._process_timer.timeout.connect(self._detect_process_presence)
+        self._process_timer.timeout.connect(self._start_detection_thread)
         self.start_on_launch = False
         self.scheduled_time: clock_time | None = None
         self.process_detection_enabled = False
+        self.game_detection_enabled = False
         self._last_detected_key = ""
+        self._detection_lock = threading.Lock()
+        self._game_service = GameIntegrationService()
 
     def configure_presets(self, presets: list[Preset]) -> None:
         self._presets = presets
@@ -45,7 +50,7 @@ class SafeAutomationService(QObject):
         self.process_detection_enabled = enabled
         if enabled:
             self._process_timer.start(max(15, interval_seconds) * 1000)
-            self._detect_process_presence()
+            self._start_detection_thread()
             logger.log("Deteccao de processos ativada com intervalo seguro.", "success")
         else:
             self._process_timer.stop()
@@ -70,37 +75,57 @@ class SafeAutomationService(QObject):
         logger.log(f"Automacao aplicou o preset: {preset.name}.", "info")
         self.preset_selected.emit(preset)
 
-    def _detect_process_presence(self) -> None:
+    def _start_detection_thread(self) -> None:
         if not self.process_detection_enabled:
             return
-        try:
-            import psutil
-        except Exception:
-            logger.log("psutil nao esta instalado; automacao por processo indisponivel.", "warning")
-            self.set_process_detection(False)
-            return
+        # Usa uma thread simples para nao travar a UI durante o psutil.process_iter
+        thread = threading.Thread(target=self._detect_process_presence, daemon=True)
+        thread.start()
 
-        names: set[str] = set()
-        try:
-            for proc in psutil.process_iter(["name"]):
-                name = (proc.info.get("name") or "").lower()
-                if name:
-                    names.add(name)
-        except Exception as exc:
-            logger.log(f"Nao foi possivel ler processos: {exc}", "warning")
+    def _detect_process_presence(self) -> None:
+        if not self._detection_lock.acquire(blocking=False):
             return
+        try:
+            # 1. Tenta detecção de jogos primeiro (Prioridade Máxima)
+            if self.game_detection_enabled:
+                game_result = self._game_service.detect_active_game()
+                if game_result:
+                    config, exe_key = game_result
+                    if exe_key != self._last_detected_key:
+                        self._last_detected_key = exe_key
+                        logger.log(f"Jogo detectado automaticamente: {exe_key}.", "success")
+                        self.config_detected.emit(config, exe_key)
+                    return
 
-        rules = [
-            (("code.exe", "vscode.exe"), "vscode", PresenceConfig("Programando no VS Code", "Editor aberto | foco dev", "code", "VS Code detectado", mood="dev")),
-            (("spotify.exe",), "spotify", PresenceConfig("Ouvindo musica", "Spotify aberto | vibe ativa", "music", "Spotify detectado", mood="music")),
-            (("valorant.exe", "riotclientservices.exe"), "valorant", PresenceConfig("Jogando Valorant", "Fila gamer | mira ligada", "game", "Valorant detectado", mood="gaming")),
-            (("node.exe", "python.exe", "pythonw.exe"), "backend", PresenceConfig("Rodando backend", "Node/Python ativo | APIs", "code", "Backend detectado", mood="dev")),
-            (("chrome.exe", "msedge.exe", "firefox.exe"), "browser", PresenceConfig("Navegando/estudando", "Browser aberto | pesquisa", "study", "Navegador detectado", mood="study")),
-        ]
-        for process_names, key, config in rules:
-            if any(name in names for name in process_names):
-                if key != self._last_detected_key:
-                    self._last_detected_key = key
-                    logger.log(f"Automacao detectou: {key}.", "info")
-                    self.config_detected.emit(config, key)
+            # 2. Tenta detecção de processos gerais (Fallback)
+            try:
+                import psutil
+            except Exception:
+                self.process_detection_enabled = False
                 return
+
+            names: set[str] = set()
+            try:
+                for proc in psutil.process_iter(["name"]):
+                    name = (proc.info.get("name") or "").lower()
+                    if name:
+                        names.add(name)
+            except Exception as exc:
+                return
+
+            rules = [
+                (("code.exe", "vscode.exe"), "vscode", PresenceConfig("Programando no VS Code", "Editor aberto | foco dev", "code", "VS Code detectado", mood="dev")),
+                (("spotify.exe",), "spotify", PresenceConfig("Ouvindo musica", "Spotify aberto | vibe ativa", "music", "Spotify detectado", mood="music")),
+                (("valorant.exe", "riotclientservices.exe"), "valorant", PresenceConfig("Jogando Valorant", "Fila gamer | mira ligada", "game", "Valorant detectado", mood="gaming")),
+                (("node.exe", "python.exe", "pythonw.exe"), "backend", PresenceConfig("Rodando backend", "Node/Python ativo | APIs", "code", "Backend detectado", mood="dev")),
+                (("chrome.exe", "msedge.exe", "firefox.exe"), "browser", PresenceConfig("Navegando/estudando", "Browser aberto | pesquisa", "study", "Navegador detectado", mood="study")),
+            ]
+            for process_names, key, config in rules:
+                if any(name in names for name in process_names):
+                    if key != self._last_detected_key:
+                        self._last_detected_key = key
+                        logger.log(f"Automacao detectou: {key}.", "info")
+                        self.config_detected.emit(config, key)
+                    return
+        finally:
+            self._detection_lock.release()

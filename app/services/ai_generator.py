@@ -153,52 +153,57 @@ class AIGeneratorService:
         seed = (prompt or "Presence Studio").strip()
         mood = (mood or "cyberpunk").strip().lower()
         lowered = seed.lower()
-        if any(word in lowered for word in ["codando", "programando", "codigo", "python", "node", "api"]):
-            mood = "dev"
-        elif any(word in lowered for word in ["estud", "aula", "prova"]):
-            mood = "study"
-        elif any(word in lowered for word in ["jog", "game", "valorant"]):
-            mood = "gaming"
-        elif any(word in lowered for word in ["musica", "spotify", "playlist"]):
-            mood = "music"
-        elif any(word in lowered for word in ["profissional", "trabalho", "cliente"]):
-            mood = "professional"
+        
+        # Categorização dinâmica baseada em palavras-chave
+        categories = {
+            "dev": ["codando", "programando", "codigo", "python", "node", "api", "debug", "terminal", "github"],
+            "study": ["estud", "aula", "prova", "faculdade", "escola", "leitura", "pesquisa"],
+            "gaming": ["jogando", "game", "valorant", "lol", "ranked", "partida", "fps", "rpg"],
+            "music": ["musica", "spotify", "playlist", "ouvindo", "som", "batida"],
+            "professional": ["profissional", "trabalho", "cliente", "reuniao", "projeto", "office"],
+        }
+        
+        detected_mood = mood
+        for cat, words in categories.items():
+            if any(word in lowered for word in words):
+                detected_mood = cat
+                break
+
         templates = {
             "dev": ("Codando no modo foco", "Python | APIs | Discord RPC"),
             "study": ("Estudando com foco", "Anotacoes | Pesquisa | Disciplina"),
             "gaming": ("Jogando no modo ranked", "Partida ativa | GG"),
             "music": ("Ouvindo musica", "Playlist ligada | Vibe boa"),
             "professional": ("Trabalhando em projeto", "Planejamento | Execucao | Entrega"),
-            "shitpost": ("Compilando ideias suspeitas", "Humor duvidoso | Energia alta"),
+            "cyberpunk": ("Cyber Terminal", "Discord RPC | IA | Noite"),
         }
-        details, state = templates.get(mood, ("Cyber Terminal", "Discord RPC | IA | Noite"))
+        
+        default_details, default_state = templates.get(detected_mood, templates["cyberpunk"])
+        
+        # Tenta extrair algo útil do prompt para os detalhes
         ignored_action_words = [
-            "quero que",
-            "deixando no perfil que",
-            "deixar no perfil que",
-            "ative",
-            "ativar",
-            "conecte",
-            "conectar",
-            "aparecer",
-            "perfil",
-            "rich presence",
+            "quero que", "deixando no perfil que", "deixar no perfil que", 
+            "ative", "ativar", "conecte", "conectar", "aparecer", "perfil", 
+            "rich presence", "presenca", "coloca", "muda para", "gera um"
         ]
+        
         cleaned = seed
         for word in ignored_action_words:
-            cleaned = re.sub(word, "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
-        if "estou codando" in lowered or "codando" in lowered:
-            details = "Codando no modo foco"
-        elif cleaned:
-            cleaned = re.sub(r"\s+", " ", cleaned)
-            if len(cleaned) > 12:
-                details = cleaned[:96]
+            cleaned = re.sub(r"\b" + re.escape(word) + r"\b", "", cleaned, flags=re.IGNORECASE).strip(" ,.-")
+            
+        details = default_details
+        if cleaned and len(cleaned) > 3:
+            # Capitaliza a primeira letra e limita tamanho
+            details = cleaned[0].upper() + cleaned[1:96]
         elif seed:
-            details = seed[:96]
+            details = seed[0].upper() + seed[1:96]
+
         return PresenceConfig(
             details=details,
-            state=state,
-            large_text="Modo inteligente ativado",
+            state=default_state,
+            large_image="studio",
+            large_text="Modo inteligente (Fallback)",
+            small_image="studio_small",
             small_text="Online no Presence Studio",
             rotating_phrases=[
                 "Debugando o impossivel",
@@ -206,8 +211,8 @@ class AIGeneratorService:
                 "Codando sem travar o PC",
             ],
             buttons=[
-                PresenceButton("GitHub", "https://github.com/"),
-                PresenceButton("Projeto", "https://example.com/"),
+                PresenceButton("GitHub", "https://github.com/willianbife/Rich-presence"),
+                PresenceButton("Projeto", "https://github.com/willianbife/Rich-presence"),
             ],
-            mood=mood or "cyberpunk",
+            mood=detected_mood,
         )

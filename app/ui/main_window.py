@@ -48,6 +48,7 @@ from app.utils.logger import logger
 
 class AIGeneratorWorker(QObject):
     finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, prompt: str, mode: str, current: PresenceConfig) -> None:
         super().__init__()
@@ -56,8 +57,12 @@ class AIGeneratorWorker(QObject):
         self.current = deepcopy(current)
 
     def run(self) -> None:
-        result = AIGeneratorService().generate(self.prompt, self.mode, self.current)
-        self.finished.emit(result)
+        try:
+            result = AIGeneratorService().generate(self.prompt, self.mode, self.current)
+            self.finished.emit(result)
+        except Exception as exc:
+            logger.log(f"Erro critico no worker de IA: {exc}", "error")
+            self.error.emit(str(exc))
 
 
 class MainWindow(QMainWindow, AnimatedStackMixin):
@@ -84,6 +89,7 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         self._ai_thread: QThread | None = None
         self._ai_worker: AIGeneratorWorker | None = None
         self._ai_pending_actions: dict[str, bool | str] = {}
+        self._ai_sender_ref: QPushButton | None = None
 
         self.nav_buttons: list[QPushButton] = []
         self.editor_fields: dict[str, QLineEdit] = {}
@@ -140,6 +146,7 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
             ("Preview", "◈"),
             ("Presets", "▣"),
             ("Aparência", "◆"),
+            ("Jogos & Steam", "🎮"),
             ("Integrações", "↔"),
             ("Automação Segura", "◷"),
             ("Logs", "☰"),
@@ -169,6 +176,7 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         self.stack.addWidget(self._page_preview())
         self.stack.addWidget(self._page_presets())
         self.stack.addWidget(self._page_themes())
+        self.stack.addWidget(self._page_games())
         self.stack.addWidget(self._page_integrations())
         self.stack.addWidget(self._page_automation())
         self.stack.addWidget(self._page_logs())
@@ -411,8 +419,15 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         self.ai_chat_status = QLabel("Configure GEMINI_API_KEY no .env. Se falhar, o gerador local assume.")
         self.ai_chat_status.setObjectName("Muted")
         self.ai_chat_status.setWordWrap(True)
+        
+        # Opções de comportamento da IA
+        self.ai_allow_state_change = QCheckBox("Permitir que a IA altere o campo 'Estado' (state)")
+        self.ai_allow_state_change.setChecked(True)
+        self.ai_allow_state_change.setToolTip("Se desmarcado, a IA não mexerá na segunda linha da sua presença.")
+        
         chat_card.layout.addWidget(self.ai_chat_history)
         chat_card.layout.addWidget(self.ai_chat_input)
+        chat_card.layout.addWidget(self.ai_allow_state_change)
         chat_card.layout.addLayout(chat_actions)
         chat_card.layout.addWidget(self.ai_chat_status)
         layout.addWidget(chat_card)
@@ -605,17 +620,68 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         layout.addStretch()
         return page
 
-    def _page_logs(self) -> QWidget:
-        page, layout = self._page_shell("Logs")
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(500)
-        layout.addWidget(self.log_box)
+    def _page_games(self) -> QWidget:
+        page, layout = self._page_shell("Jogos & Steam")
+        
+        auto_card = Card("Detecção Automática", "O aplicativo monitora jogos conhecidos e atualiza seu status instantaneamente.")
+        self.game_detection_check = QCheckBox("Ativar detecção de jogos em tempo real")
+        self.game_detection_check.setChecked(False)
+        self.game_detection_check.stateChanged.connect(self._toggle_game_detection)
+        
+        info = QLabel(
+            "Como funciona:\n"
+            "• O sistema varre processos como cs2.exe, valorant.exe, minecraft.exe, etc.\n"
+            "• Se detectado, ele aplica o preset do jogo automaticamente.\n"
+            "• Prioridade máxima: Se um jogo for detectado, ele ignora outras automações."
+        )
+        info.setObjectName("Muted")
+        info.setWordWrap(True)
+        
+        auto_card.layout.addWidget(self.game_detection_check)
+        auto_card.layout.addWidget(info)
+        layout.addWidget(auto_card)
+        
+        list_card = Card("Jogos Suportados", "Lista de jogos com mapeamento de ícones e nomes automático.")
+        game_list = QTextEdit()
+        game_list.setReadOnly(True)
+        game_list.setMinimumHeight(200)
+        
+        games_text = "• Counter-Strike 2 / CS:GO\n" \
+                     "• League of Legends / Teamfight Tactics\n" \
+                     "• Valorant\n" \
+                     "• Minecraft (Java & Bedrock)\n" \
+                     "• Roblox\n" \
+                     "• Grand Theft Auto V / FiveM\n" \
+                     "• Fortnite\n" \
+                     "• Call of Duty\n" \
+                     "• Overwatch 2\n" \
+                     "• Stardew Valley\n" \
+                     "• Steam Client"
+        game_list.setText(games_text)
+        list_card.layout.addWidget(game_list)
+        layout.addWidget(list_card)
+        
+        layout.addStretch()
         return page
+
+    def _toggle_game_detection(self) -> None:
+        enabled = self.game_detection_check.isChecked()
+        self.automation.game_detection_enabled = enabled
+        if enabled:
+            # Ativa a detecção geral se não estiver ativa
+            if not self.automation.process_detection_enabled:
+                self.automation.set_process_detection(True, 15)
+            logger.log("Deteccao de jogos ativada.", "success")
+        else:
+            logger.log("Deteccao de jogos desativada.", "info")
 
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
-        self.fade_in_widget(self.stack.currentWidget())
+        current = self.stack.currentWidget()
+        if current:
+            self.fade_in_widget(current)
+            current.update()
+        self.root.update()  # Força o Root (GlassRoot) a repintar o fundo
         for i, button in enumerate(self.nav_buttons):
             button.setChecked(i == index)
 
@@ -732,20 +798,39 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         if self._ai_thread and self._ai_thread.isRunning():
             logger.log("Aguarde a geracao atual terminar.", "warning")
             return
+            
+        sender = self.sender()
+        if isinstance(sender, QPushButton):
+            self._ai_sender_ref = sender
+            self._ai_sender_ref.setEnabled(False)
+
         self.ai_status.setText("Gerando com IA...")
-        self.ai_status.repaint()
+        self.ai_status.update()
         prompt = self.ai_prompt.toPlainText()
+        
         self._ai_thread = QThread(self)
-        worker = AIGeneratorWorker(prompt, mode, self.current_config)
-        self._ai_worker = worker
-        worker.moveToThread(self._ai_thread)
-        self._ai_thread.started.connect(worker.run)
-        worker.finished.connect(self._apply_ai_result)
-        worker.finished.connect(self._ai_thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        self._ai_worker = AIGeneratorWorker(prompt, mode, self.current_config)
+        self._ai_worker.moveToThread(self._ai_thread)
+        
+        self._ai_thread.started.connect(self._ai_worker.run)
+        self._ai_worker.finished.connect(self._apply_ai_result)
+        self._ai_worker.error.connect(lambda e: logger.log(f"Erro na IA: {e}", "error"))
+        
+        self._ai_worker.finished.connect(self._ai_thread.quit)
+        self._ai_worker.error.connect(self._ai_thread.quit)
+        
+        self._ai_thread.finished.connect(self._on_ai_thread_finished)
+        self._ai_thread.finished.connect(self._ai_worker.deleteLater)
         self._ai_thread.finished.connect(self._ai_thread.deleteLater)
-        self._ai_thread.finished.connect(lambda: setattr(self, "_ai_worker", None))
+        
         self._ai_thread.start()
+
+    def _on_ai_thread_finished(self) -> None:
+        if self._ai_sender_ref:
+            self._ai_sender_ref.setEnabled(True)
+            self._ai_sender_ref = None
+        self._ai_thread = None
+        self._ai_worker = None
 
     def _run_ai_chat(self, mode: str) -> None:
         prompt = self.ai_chat_input.toPlainText().strip()
@@ -764,35 +849,45 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         self._run_ai_generator(mode)
 
     def _apply_ai_result(self, config: PresenceConfig) -> None:
-        if self._ai_thread:
-            self._ai_thread = None
-        self._ai_worker = None
-        if self.sender() is not None:
+        try:
+            if not isinstance(config, PresenceConfig):
+                logger.log("IA retornou um resultado invalido.", "warning")
+                return
+
+            # Preserva o estado atual se o usuário desmarcou a permissão
+            if not self.ai_allow_state_change.isChecked():
+                config.state = self.current_config.state
+
             self._load_config_to_editor(config)
-        self.ai_status.setText("Resultado aplicado ao editor. Voce pode enviar ou salvar como preset.")
-        action_result = ""
-        if self._ai_pending_actions.get("send_to_discord"):
-            if self._ensure_rpc_connected() and self._send_current_to_rpc(force=True):
-                action_result = "\nAcao: conectei/atualizei via Discord RPC. Confira seu perfil no Discord desktop."
-            else:
-                action_result = "\nAcao: nao consegui enviar. Abra o Discord desktop e confira o Client ID."
-        if hasattr(self, "ai_chat_history"):
-            phrases = ", ".join(config.rotating_phrases[:3]) if config.rotating_phrases else "sem frases rotativas"
-            self.ai_chat_history.append(
-                "\nIA: Pronto. Apliquei no editor:\n"
-                f"Titulo/details: {config.details}\n"
-                f"Estado: {config.state}\n"
-                f"Mood: {config.mood}\n"
-                f"Frases: {phrases}"
-                f"{action_result}"
-            )
-            status = "Resposta aplicada."
+            self.ai_status.setText("Resultado aplicado ao editor. Voce pode enviar ou salvar como preset.")
+            
+            action_result = ""
             if self._ai_pending_actions.get("send_to_discord"):
-                status += " Tambem tentei ativar no Discord."
-            self.ai_chat_status.setText(status)
-            self.ai_chat_input.clear()
-        self._ai_pending_actions = {}
-        logger.log("IA Generator aplicou uma presenca ao editor.", "success")
+                if self._ensure_rpc_connected() and self._send_current_to_rpc(force=True):
+                    action_result = "\nAcao: conectei/atualizei via Discord RPC. Confira seu perfil no Discord desktop."
+                else:
+                    action_result = "\nAcao: nao consegui enviar. Abra o Discord desktop e confira o Client ID."
+
+            if hasattr(self, "ai_chat_history"):
+                phrases = ", ".join(config.rotating_phrases[:3]) if config.rotating_phrases else "sem frases rotativas"
+                self.ai_chat_history.append(
+                    "\nIA: Pronto. Apliquei no editor:\n"
+                    f"Titulo/details: {config.details}\n"
+                    f"Estado: {config.state}\n"
+                    f"Mood: {config.mood}\n"
+                    f"Frases: {phrases}"
+                    f"{action_result}"
+                )
+                status = "Resposta aplicada."
+                if self._ai_pending_actions.get("send_to_discord"):
+                    status += " Tambem tentei ativar no Discord."
+                self.ai_chat_status.setText(status)
+                self.ai_chat_input.clear()
+
+            self._ai_pending_actions = {}
+            logger.log("IA Generator aplicou uma presenca ao editor.", "success")
+        except Exception as exc:
+            logger.log(f"Erro ao aplicar resultado da IA: {exc}", "error")
 
     def _infer_ai_actions(self, prompt: str, mode: str) -> dict[str, bool | str]:
         text = prompt.lower()
@@ -897,8 +992,26 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         self.preview_labels["large_text"].setText(f"Imagem grande: {config.large_text or config.large_image or 'sem asset'}")
         self.preview_labels["small_text"].setText(f"Imagem pequena: {config.small_text or config.small_image or 'sem asset'}")
         self.preview_labels["timestamp"].setText("Com timestamp ativo" if config.timestamp_enabled else "Sem timestamp")
-        valid_buttons = [button.label for button in config.buttons if button.is_valid()]
-        self.preview_buttons.setText("  ".join(f"[ {label} ]" for label in valid_buttons))
+        
+        # Validação visual de assets e botões
+        errors = []
+        asset_regex = re.compile(r"^[a-z0-9_]{1,32}$")
+        if config.large_image and not asset_regex.match(config.large_image):
+            errors.append("• Asset grande inválido (use minúsculas, números e _)")
+        if config.small_image and not asset_regex.match(config.small_image):
+            errors.append("• Asset pequeno inválido (use minúsculas, números e _)")
+            
+        for i, btn in enumerate(config.buttons):
+            if btn.label.strip() and not btn.is_valid():
+                errors.append(f"• Botão {i+1} com URL inválida")
+                
+        if errors:
+            self.preview_buttons.setStyleSheet(f"color: {self.theme.danger}")
+            self.preview_buttons.setText("\n".join(errors))
+        else:
+            self.preview_buttons.setStyleSheet("")
+            valid_buttons = [button.label for button in config.buttons if button.is_valid()]
+            self.preview_buttons.setText("  ".join(f"[ {label} ]" for label in valid_buttons))
 
     def _refresh_presets(self) -> None:
         self.preset_list.clear()

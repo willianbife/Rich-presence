@@ -13,8 +13,19 @@ class PresenceButton:
     url: str = ""
 
     def is_valid(self) -> bool:
-        parsed = urlparse(self.url.strip())
-        return bool(self.label.strip() and parsed.scheme in {"http", "https"} and parsed.netloc)
+        url = self.url.strip()
+        if not url:
+            return False
+        
+        # Tenta corrigir URLs sem esquema
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+            
+        try:
+            parsed = urlparse(url)
+            return bool(self.label.strip() and parsed.scheme in {"http", "https"} and parsed.netloc and "." in parsed.netloc)
+        except Exception:
+            return False
 
 
 @dataclass
@@ -32,9 +43,10 @@ class PresenceConfig:
     start_timestamp: int | None = None
 
     def ensure_timestamp(self) -> None:
-        if self.timestamp_enabled and self.start_timestamp is None:
-            self.start_timestamp = int(time())
-        if not self.timestamp_enabled:
+        if self.timestamp_enabled:
+            if self.start_timestamp is None:
+                self.start_timestamp = int(time())
+        else:
             self.start_timestamp = None
 
     def to_rpc_payload(self) -> dict[str, Any]:

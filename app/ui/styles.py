@@ -153,15 +153,16 @@ def build_stylesheet(theme: Theme, card_opacity: int = 62) -> str:
         color: #071016;
     }}
 
-    QScrollArea {{
-        border: none;
+    QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget {{
         background: transparent;
+        border: none;
     }}
 
     QScrollBar:vertical {{
         background: rgba(7, 11, 24, 0.36);
         width: 10px;
     }}
+
 
     QScrollBar::handle:vertical {{
         background: rgba(142, 247, 255, 0.48);
