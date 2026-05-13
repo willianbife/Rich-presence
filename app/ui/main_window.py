@@ -289,7 +289,18 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
             edit = QLineEdit()
             edit.textChanged.connect(self._editor_changed)
             self.editor_fields[key] = edit
-            grid.addWidget(edit, row, 1)
+            
+            if "image" in key:
+                row_layout = QHBoxLayout()
+                row_layout.addWidget(edit, 1)
+                pick_btn = QPushButton("📁")
+                pick_btn.setToolTip("Escolher imagem local")
+                pick_btn.setFixedWidth(40)
+                pick_btn.clicked.connect(lambda _, k=key: self._pick_image_asset(k))
+                row_layout.addWidget(pick_btn)
+                grid.addLayout(row_layout, row, 1)
+            else:
+                grid.addWidget(edit, row, 1)
 
         self.timestamp_check = QCheckBox("Usar timestamp de início")
         self.timestamp_check.stateChanged.connect(self._editor_changed)
@@ -1171,3 +1182,27 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         }
         color = colors.get(level, self.theme.muted)
         self.log_box.append(f'<span style="color:{color}">{entry}</span>')
+
+    def _pick_image_asset(self, key: str) -> None:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Escolher asset de imagem",
+            "",
+            "Imagens (*.png *.jpg *.jpeg *.webp *.bmp)",
+        )
+        if not file_name:
+            return
+        
+        # O Discord RPC usa o nome do asset configurado no portal do desenvolvedor.
+        # No entanto, se o usuário quiser usar o nome do arquivo como sugestão:
+        asset_name = Path(file_name).stem.lower()
+        asset_name = re.sub(r"[^a-z0-9_]", "_", asset_name)[:32]
+        
+        self.editor_fields[key].setText(asset_name)
+        logger.log(f"Sugestão de nome de asset aplicada para {key}: {asset_name}", "info")
+        logger.log("Lembre-se: o asset deve ser enviado no Discord Developer Portal com este nome exato.", "warning")
+
+    def closeEvent(self, event) -> None:
+        logger.log("Encerrando aplicativo e limpando presença...", "info")
+        self.rpc.disconnect(silent=True)
+        event.accept()

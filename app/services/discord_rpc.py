@@ -53,6 +53,7 @@ class DiscordRPCService(QObject):
     def disconnect(self, silent: bool = False) -> None:
         if self._rpc:
             try:
+                self.clear_presence()
                 self._rpc.close()
             except Exception:
                 pass
@@ -63,6 +64,14 @@ class DiscordRPCService(QObject):
         if not silent:
             self._emit_status("Desconectado.", False)
             logger.log("Discord RPC desconectado.", "info")
+
+    def clear_presence(self) -> None:
+        if self.connected and self._rpc:
+            try:
+                self._rpc.clear()
+                logger.log("Presença removida do perfil.", "info")
+            except Exception as exc:
+                logger.log(f"Erro ao limpar presença: {exc}", "error")
 
     def update_presence(self, config: PresenceConfig) -> bool:
         if not self.connected or not self._rpc:

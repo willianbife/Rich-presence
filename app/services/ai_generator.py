@@ -79,38 +79,48 @@ class AIGeneratorService:
 
     def _call_gemini(self, api_key: str, prompt: str, mode: str, current: PresenceConfig | None) -> str:
         system = """
-Voce e um assistente especializado em Discord Rich Presence.
-Responda somente JSON valido, sem markdown, sem comentarios e sem texto fora do JSON.
+Você é o 'Maestro da Presença', um assistente criativo e espirituoso especializado em Discord Rich Presence.
+Sua missão é transformar pedidos simples em presenças memoráveis, autênticas e que transmitam uma "vibe" real.
 
-Schema obrigatorio:
+Schema obrigatório (JSON):
 {
-  "title": "nome curto do preset",
-  "details": "linha principal, maximo 80 caracteres",
-  "state": "linha secundaria, maximo 80 caracteres",
-  "large_text": "tooltip da imagem grande",
-  "small_text": "tooltip da imagem pequena",
+  "title": "nome curto e criativo do preset",
+  "details": "linha principal (max 80 chars) - O QUE você está fazendo",
+  "state": "linha secundária (max 80 chars) - COMO ou ONDE você está",
+  "large_text": "tooltip da imagem grande (vibe do momento)",
+  "small_text": "tooltip da imagem pequena (status do app)",
   "large_image": "",
   "small_image": "",
-  "rotating_phrases": ["3 a 8 frases curtas"],
-  "buttons": [{"label": "GitHub", "url": "https://github.com/"}],
+  "rotating_phrases": ["3 a 8 frases curtas que alternam"],
+  "buttons": [{"label": "Texto", "url": "URL"}],
   "mood": "dev|study|gaming|music|professional|cyberpunk|dark|funny"
 }
 
-Regras:
-- Entenda intencao, nao copie o pedido literalmente.
-- Se o usuario pedir para ativar, conectar ou aparecer no perfil, gere a presenca ideal; o app executa a conexao.
-- Se pedir para mudar descricao, altere details.
-- Se pedir status/estado, altere state.
-- Se pedir melhorar, preserve a ideia atual e deixe mais natural.
-- Use portugues natural, curto e bom para Discord.
-- Nao invente URL pessoal. Use no maximo 2 botoes http/https.
-- Evite frases genericas como "quero que".
+Regras de Ouro:
+1. NÃO SEJA LITERAL. Se o usuário diz "jogando lol e perdendo", não escreva "Jogando LoL". Escreva algo como "Afundado no Low Elo" ou "Em busca da vitória inexistente".
+2. PERSONALIZE PELO MOOD:
+   - dev: focado, técnico, levemente frustrado com bugs ou orgulhoso do código.
+   - gaming: competitivo, imersivo ou engraçado sobre a derrota/vitória. Gírias gamer são bem-vindas.
+   - study: focado, cansado, mas determinado.
+   - funny: sarcástico, irônico, shitpost total.
+   - cyberpunk: futurista, neon, hacker, estético.
+3. FRASES ROTATIVAS: Devem contar uma pequena história ou variar o estado de espírito. Evite repetições.
+4. LINGUAGEM: Use português natural do Brasil, gírias de internet (se apropriado) e seja conciso.
+5. INTENÇÃO: Se o usuário pedir para "melhorar" (improve), pegue a presença atual e deixe-a 10x mais interessante, humana e menos genérica.
+6. Se o usuário for vago, seja criativo mas mantenha a utilidade.
+
+Exemplos de "Inteligência":
+- Pedido: "estou estudando calculo e morrendo"
+  Resposta: {"details": "Derivando a minha sanidade", "state": "Integral de lágrimas por minuto", "mood": "study", "rotating_phrases": ["Onde foi que eu errei?", "X é igual a desespero", "Pausa para chorar"]}
+- Pedido: "codando python"
+  Resposta: {"details": "Lutando contra IndentationError", "state": "Automatizando minha vida", "mood": "dev", "rotating_phrases": ["Import antigravidade", "Zen do Python ativado", "Só mais um commit"]}
 """.strip()
         body = {
+            "system_instruction": {"parts": [{"text": system}]},
             "contents": [
                 {
+                    "role": "user",
                     "parts": [
-                        {"text": system},
                         {
                             "text": json.dumps(
                                 {
@@ -125,9 +135,9 @@ Regras:
                 }
             ],
             "generationConfig": {
-                "temperature": 0.55,
-                "topP": 0.9,
-                "maxOutputTokens": 900,
+                "temperature": 0.75,
+                "topP": 0.95,
+                "maxOutputTokens": 1024,
                 "responseMimeType": "application/json",
             },
         }
@@ -204,11 +214,11 @@ Regras:
         mood_scores = {
             "dev": ["cod", "program", "python", "node", "api", "debug", "terminal", "github", "vscode", "backend", "frontend"],
             "study": ["estud", "aula", "prova", "faculdade", "escola", "leitura", "pesquisa", "curso", "aprend"],
-            "gaming": ["jog", "game", "valorant", "league of legends", "lol", "ranked", "partida", "minecraft", "steam", "cs2", "roblox"],
+            "gaming": ["jog", "game", "valorant", "league of legends", "lol", "ranked", "partida", "minecraft", "steam", "cs2", "roblox", "tiro", "morte", "morrendo", "pvp", "fps"],
             "music": ["musica", "spotify", "playlist", "ouvindo", "som", "beat", "album"],
             "professional": ["profissional", "trabalho", "cliente", "reuniao", "projeto", "produtiv", "freela"],
             "dark": ["dark", "sombrio", "minimal", "preto", "serio"],
-            "funny": ["meme", "shitpost", "engrac", "zoeira", "caos"],
+            "funny": ["meme", "shitpost", "engrac", "zoeira", "caos", "burro", "idiota", "lixo"],
             "cyberpunk": ["cyber", "neon", "futur", "hacker", "terminal"],
         }
         mood = current.mood if current and current.mood else (default_mood or "cyberpunk")
@@ -260,15 +270,17 @@ Regras:
         if intent.action == "state" and current and current.details:
             return current.details
         if topic:
-            if intent.mood == "gaming" and intent.style == "funny":
+            if intent.mood == "gaming":
                 funny_games = {
                     "League of Legends": "Perdendo PDL no LoL",
                     "Valorant": "Errando pixel no Valorant",
                     "Minecraft": "Minerando sem plano",
                     "Roblox": "Aprontando no Roblox",
                     "Steam": "Comprando jogo que nao vou zerar",
+                    "morto a tiros": "Virando saudade no mapa",
                 }
-                return self._limit(funny_games.get(topic, f"Jogando {topic} sem garantia"), 80)
+                if intent.style == "funny" or "morto" in topic:
+                    return self._limit(funny_games.get(topic, f"Sendo derrotado em {topic}"), 80)
             templates = {
                 "dev": f"Codando {topic}",
                 "study": f"Estudando {topic}",
@@ -293,7 +305,7 @@ Regras:
             "dark": "Foco silencioso | Dark mode",
             "funny": "Bug nenhum, confia",
         }
-        if intent.mood == "gaming" and intent.style == "funny":
+        if intent.mood == "gaming" and (intent.style == "funny" or "morto" in (intent.topic or "")):
             return "SoloQ mentalmente estavel"
         return states.get(intent.mood, profile["state"])
 
@@ -309,7 +321,7 @@ Regras:
             "funny": ["Compilando desculpas", "Zero bugs na imaginacao", "Deploy da bagunca", "Caos com estilo"],
         }
         phrases = phrase_bank.get(intent.mood, [profile["details"], profile["state"]])
-        if intent.mood == "gaming" and intent.style == "funny":
+        if intent.mood == "gaming" and (intent.style == "funny" or "morto" in (intent.topic or "")):
             topic = intent.topic or "o jogo"
             phrases = [
                 f"Sofrendo em {topic}",
@@ -318,8 +330,8 @@ Regras:
                 "GG moral em andamento",
                 "Meu time acredita, eu nao",
             ]
-        if intent.topic and not (intent.mood == "gaming" and intent.style == "funny"):
-            phrases = [f"{phrases[0]}: {intent.topic}", *phrases[1:]]
+        elif intent.topic:
+            phrases = [f"{intent.topic}", *phrases]
         return [self._limit(item, 80) for item in phrases[:6]]
 
     def _buttons(self, intent: Intent) -> list[PresenceButton]:
@@ -334,12 +346,16 @@ Regras:
 
         text = prompt.strip()
         cleanup = [
+            r"\bcoloque que estou sendo\b", r"\bcoloque que estou\b",
+            r"\bcoloque que\b", r"\bcoloque\b", r"\bcolocar\b",
+            r"\bestou sendo\b", r"\bestou\b", r"\beu estou\b",
+            r"\bdeixa que eu\b", r"\bmuda pra\b", r"\baltera pra\b",
             r"\bcoloque de uma forma\b", r"\bde uma forma\b", r"\bforma\b",
             r"\bimbecil\b", r"\bidiota\b", r"\btosca?\b", r"\bzoada?\b",
             r"\bquero que\b", r"\bpor favor\b", r"\bative\b", r"\bativar\b", r"\bconecte\b",
             r"\bconectar\b", r"\bcoloca(?:r)?\b", r"\baparecer\b", r"\bno meu perfil\b",
             r"\bperfil\b", r"\brich presence\b", r"\bpresence\b", r"\bpresen[cç]a\b",
-            r"\bdeixando\b", r"\bdeixar\b", r"\bestou\b", r"\beu estou\b", r"\bagora\b",
+            r"\bdeixando\b", r"\bdeixar\b", r"\bagora\b",
             r"\bdiscord\b", r"\bmuda(?:r)?\b", r"\baltera(?:r)?\b", r"\bdescri[cç][aã]o\b",
             r"\bdetails\b", r"\bfaz(?:er)?\b", r"\bgera(?:r)?\b", r"\bfrases?\b",
             r"\brotativas?\b", r"\bpra\b", r"\bpara\b", r"\bprofissional\b",
