@@ -675,6 +675,14 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         else:
             logger.log("Deteccao de jogos desativada.", "info")
 
+    def _page_logs(self) -> QWidget:
+        page, layout = self._page_shell("Logs")
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setMinimumHeight(500)
+        layout.addWidget(self.log_box)
+        return page
+
     def _switch_page(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
         current = self.stack.currentWidget()
@@ -871,7 +879,7 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
             if hasattr(self, "ai_chat_history"):
                 phrases = ", ".join(config.rotating_phrases[:3]) if config.rotating_phrases else "sem frases rotativas"
                 self.ai_chat_history.append(
-                    "\nIA: Pronto. Apliquei no editor:\n"
+                    "\nIA: Entendi o pedido e montei uma presenca pronta:\n"
                     f"Titulo/details: {config.details}\n"
                     f"Estado: {config.state}\n"
                     f"Mood: {config.mood}\n"

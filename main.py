@@ -2,8 +2,10 @@ import sys
 import traceback
 from datetime import datetime
 
+# pyrefly: ignore [missing-import]
 from PySide6.QtWidgets import QApplication
 
+# pyrefly: ignore [missing-import]
 from app.ui.main_window import MainWindow
 
 

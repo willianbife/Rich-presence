@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import psutil
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 from app.core.models import PresenceConfig
 from app.utils.logger import logger
 
+
 class GameIntegrationService:
-    # Mapeamento de executável -> (Nome Exibido, Asset Name, Mood)
     GAME_MAP = {
         "cs2.exe": ("Counter-Strike 2", "cs2", "gaming"),
         "csgo.exe": ("CS:GO", "csgo", "gaming"),
@@ -27,11 +31,16 @@ class GameIntegrationService:
     }
 
     def detect_active_game(self) -> tuple[PresenceConfig, str] | None:
-        """Varre processos e retorna uma configuração se um jogo for detectado."""
+        if psutil is None:
+            logger.log("psutil nao esta instalado; deteccao de jogos indisponivel.", "warning")
+            return None
+
         try:
-            # Pegamos os nomes de todos os processos uma única vez para performance
-            active_processes = {p.info['name'].lower() for p in psutil.process_iter(['name'])}
-            
+            active_processes = {
+                (process.info.get("name") or "").lower()
+                for process in psutil.process_iter(["name"])
+            }
+
             for exe, (name, asset, mood) in self.GAME_MAP.items():
                 if exe.lower() in active_processes:
                     config = PresenceConfig(
@@ -41,11 +50,10 @@ class GameIntegrationService:
                         large_text=name,
                         small_image="studio_small",
                         small_text="Detectado via Presence Studio",
-                        mood=mood
+                        mood=mood,
                     )
                     return config, exe
-                    
-        except Exception as e:
-            logger.log(f"Erro na deteccao de jogos: {e}", "error")
-            
+        except Exception as exc:
+            logger.log(f"Erro na deteccao de jogos: {exc}", "error")
+
         return None
