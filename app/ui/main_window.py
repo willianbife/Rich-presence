@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 import re
 
@@ -90,6 +91,7 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
         self._ai_worker: AIGeneratorWorker | None = None
         self._ai_pending_actions: dict[str, bool | str] = {}
         self._ai_sender_ref: QPushButton | None = None
+        self._ai_memory: list[dict[str, str]] = []
 
         self.nav_buttons: list[QPushButton] = []
         self.editor_fields: dict[str, QLineEdit] = {}
@@ -858,13 +860,23 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
             return
         self._ai_chat_pending_prompt = prompt or mode
         self._ai_pending_actions = self._infer_ai_actions(prompt, mode)
+        if not self._is_contextual_ai_prompt(prompt, mode):
+            self._ai_memory = []
         extracted_client_id = self._extract_client_id(prompt)
         if extracted_client_id:
             self.client_id_input.setText(extracted_client_id)
             self.ai_chat_history.append(f"\nSistema: Client ID detectado e preenchido: {extracted_client_id}")
         self.ai_chat_history.append(f"\nVoce: {prompt or 'Use a presenca atual.'}")
         self.ai_chat_status.setText("Gerando resposta...")
-        self.ai_prompt.setPlainText(prompt)
+        enriched_prompt = json.dumps(
+            {
+                "request": prompt,
+                "memory": self._ai_memory[-8:],
+                "current_presence": self.current_config.to_dict(),
+            },
+            ensure_ascii=False,
+        )
+        self.ai_prompt.setPlainText(enriched_prompt)
         self._run_ai_generator(mode)
 
     def _apply_ai_result(self, config: PresenceConfig) -> None:
@@ -873,8 +885,8 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
                 logger.log("IA retornou um resultado invalido.", "warning")
                 return
 
-            # Preserva o estado atual se o usuário desmarcou a permissão
-            if not self.ai_allow_state_change.isChecked():
+            # Preserva o estado atual apenas em pedidos explicitamente focados em details.
+            if not self.ai_allow_state_change.isChecked() and self._ai_pending_actions.get("details_only"):
                 config.state = self.current_config.state
 
             self._load_config_to_editor(config)
@@ -902,11 +914,31 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
                     status += " Tambem tentei ativar no Discord."
                 self.ai_chat_status.setText(status)
                 self.ai_chat_input.clear()
+                self._remember_ai_turn(config)
 
             self._ai_pending_actions = {}
             logger.log("IA Generator aplicou uma presenca ao editor.", "success")
         except Exception as exc:
             logger.log(f"Erro ao aplicar resultado da IA: {exc}", "error")
+
+    def _remember_ai_turn(self, config: PresenceConfig) -> None:
+        self._ai_memory.append(
+            {
+                "request": getattr(self, "_ai_chat_pending_prompt", ""),
+                "details": config.details,
+                "state": config.state,
+                "mood": config.mood,
+                "phrases": " | ".join(config.rotating_phrases[:4]),
+            }
+        )
+        self._ai_memory = self._ai_memory[-12:]
+
+    def _is_contextual_ai_prompt(self, prompt: str, mode: str) -> bool:
+        text = prompt.lower()
+        return mode in {"improve", "phrases"} or any(
+            word in text
+            for word in ["isso", "isto", "essa", "esse", "atual", "melhora", "refina", "troca so", "mesma"]
+        )
 
     def _infer_ai_actions(self, prompt: str, mode: str) -> dict[str, bool | str]:
         text = prompt.lower()
@@ -923,7 +955,8 @@ class MainWindow(QMainWindow, AnimatedStackMixin):
             "presenca agora",
         ]
         should_send = mode == "activate" or any(word in text for word in send_words)
-        return {"send_to_discord": should_send}
+        details_only = any(word in text for word in ["so a descricao", "somente descricao", "apenas descricao", "details"])
+        return {"send_to_discord": should_send, "details_only": details_only}
 
     def _extract_client_id(self, prompt: str) -> str:
         match = re.search(r"\b\d{17,22}\b", prompt)

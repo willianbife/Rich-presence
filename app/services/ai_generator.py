@@ -4,9 +4,10 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.models import PresenceButton, PresenceConfig
@@ -20,37 +21,48 @@ GEMINI_MODEL_URL = (
 
 
 @dataclass(frozen=True)
-class Intent:
+class ParsedRequest:
+    request: str
+    subject: str
     mood: str
-    topic: str
-    action: str
     style: str
+    action: str
+    memory: list[dict[str, str]] = field(default_factory=list)
 
 
 class AIGeneratorService:
     def generate(self, prompt: str, mode: str = "generate", current: PresenceConfig | None = None) -> PresenceConfig:
-        prompt = prompt.strip()
-        if not prompt and current is None:
-            return self._fallback("presenca criativa para Discord", "cyberpunk", mode, current)
+        envelope = self._read_envelope(prompt)
+        request = envelope.get("request", prompt).strip()
+        memory = envelope.get("memory", [])
+        if not request and current is None:
+            return self._fallback("presenca criativa para Discord", "cyberpunk", mode, current, memory)
 
         api_key = self._api_key()
         if not api_key:
-            logger.log("GEMINI_API_KEY ausente. Usando gerador local inteligente.", "warning")
-            return self._fallback(prompt or current.details, current.mood if current else "cyberpunk", mode, current)
+            logger.log("GEMINI_API_KEY ausente. Usando interpretador local.", "warning")
+            return self._fallback(request or current.details, current.mood if current else "cyberpunk", mode, current, memory)
 
         try:
-            raw = self._call_gemini(api_key, prompt, mode, current)
+            raw = self._call_gemini(api_key, request, mode, current, memory)
             data = self._extract_json(raw)
             return self._config_from_ai(data, current)
         except urllib.error.HTTPError as exc:
             if exc.code in {403, 429}:
-                logger.log("Gemini recusou ou limitou a chamada. Usando fallback local.", "warning")
+                logger.log("Gemini recusou ou limitou a chamada. Usando interpretador local.", "warning")
             else:
-                logger.log(f"Falha HTTP na Gemini ({exc.code}). Usando fallback local.", "warning")
+                logger.log(f"Falha HTTP na Gemini ({exc.code}). Usando interpretador local.", "warning")
         except Exception as exc:
-            logger.log(f"IA retornou algo invalido ({exc}). Usando fallback local.", "warning")
+            logger.log(f"IA retornou algo invalido ({exc}). Usando interpretador local.", "warning")
 
-        return self._fallback(prompt or (current.details if current else ""), current.mood if current else "cyberpunk", mode, current)
+        return self._fallback(request or (current.details if current else ""), current.mood if current else "cyberpunk", mode, current, memory)
+
+    def _read_envelope(self, prompt: str) -> dict[str, Any]:
+        try:
+            data = json.loads(prompt)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def _api_key(self) -> str:
         value = os.getenv("GEMINI_API_KEY", "").strip()
@@ -77,43 +89,39 @@ class AIGeneratorService:
         placeholders = {"sua_chave_aqui", "cole_sua_chave_aqui", "your_api_key_here"}
         return bool(value and value.lower() not in placeholders and len(value) > 20)
 
-    def _call_gemini(self, api_key: str, prompt: str, mode: str, current: PresenceConfig | None) -> str:
+    def _call_gemini(
+        self,
+        api_key: str,
+        prompt: str,
+        mode: str,
+        current: PresenceConfig | None,
+        memory: list[dict[str, str]],
+    ) -> str:
         system = """
-Você é o 'Maestro da Presença', um assistente criativo e espirituoso especializado em Discord Rich Presence.
-Sua missão é transformar pedidos simples em presenças memoráveis, autênticas e que transmitam uma "vibe" real.
+Voce e um assistente especializado em Discord Rich Presence.
+Responda somente JSON valido. Nao use markdown.
 
-Schema obrigatório (JSON):
+Schema obrigatorio:
 {
-  "title": "nome curto e criativo do preset",
-  "details": "linha principal (max 80 chars) - O QUE você está fazendo",
-  "state": "linha secundária (max 80 chars) - COMO ou ONDE você está",
-  "large_text": "tooltip da imagem grande (vibe do momento)",
-  "small_text": "tooltip da imagem pequena (status do app)",
+  "title": "nome curto do preset",
+  "details": "linha principal, maximo 80 caracteres",
+  "state": "linha secundaria, maximo 80 caracteres",
+  "large_text": "tooltip da imagem grande",
+  "small_text": "tooltip da imagem pequena",
   "large_image": "",
   "small_image": "",
-  "rotating_phrases": ["3 a 8 frases curtas que alternam"],
-  "buttons": [{"label": "Texto", "url": "URL"}],
+  "rotating_phrases": ["3 a 8 frases curtas"],
+  "buttons": [{"label": "Texto", "url": "https://example.com/"}],
   "mood": "dev|study|gaming|music|professional|cyberpunk|dark|funny"
 }
 
-Regras de Ouro:
-1. NÃO SEJA LITERAL. Se o usuário diz "jogando lol e perdendo", não escreva "Jogando LoL". Escreva algo como "Afundado no Low Elo" ou "Em busca da vitória inexistente".
-2. PERSONALIZE PELO MOOD:
-   - dev: focado, técnico, levemente frustrado com bugs ou orgulhoso do código.
-   - gaming: competitivo, imersivo ou engraçado sobre a derrota/vitória. Gírias gamer são bem-vindas.
-   - study: focado, cansado, mas determinado.
-   - funny: sarcástico, irônico, shitpost total.
-   - cyberpunk: futurista, neon, hacker, estético.
-3. FRASES ROTATIVAS: Devem contar uma pequena história ou variar o estado de espírito. Evite repetições.
-4. LINGUAGEM: Use português natural do Brasil, gírias de internet (se apropriado) e seja conciso.
-5. INTENÇÃO: Se o usuário pedir para "melhorar" (improve), pegue a presença atual e deixe-a 10x mais interessante, humana e menos genérica.
-6. Se o usuário for vago, seja criativo mas mantenha a utilidade.
-
-Exemplos de "Inteligência":
-- Pedido: "estou estudando calculo e morrendo"
-  Resposta: {"details": "Derivando a minha sanidade", "state": "Integral de lágrimas por minuto", "mood": "study", "rotating_phrases": ["Onde foi que eu errei?", "X é igual a desespero", "Pausa para chorar"]}
-- Pedido: "codando python"
-  Resposta: {"details": "Lutando contra IndentationError", "state": "Automatizando minha vida", "mood": "dev", "rotating_phrases": ["Import antigravidade", "Zen do Python ativado", "Só mais um commit"]}
+Regras:
+- Entenda o pedido, nao copie a frase do usuario.
+- Separe comando, assunto e tom. Exemplo: "ative a rich presence e coloque que a Brenda e farmada, mas engracado" significa assunto "Brenda farmada" com tom funny.
+- Se o usuario pedir para ativar/conectar/aparecer no perfil, gere a melhor presenca; o app executa RPC.
+- Rich Presence precisa ser curta, natural, legivel no Discord e nao passar de 80 caracteres por linha.
+- Use memoria recente quando o pedido for "deixa mais engracado", "melhora isso", "troca so o estado".
+- Se o usuario pedir tom burro/imbecil/zoado, use humor, mas nao ofenda pessoas reais de forma pesada.
 """.strip()
         body = {
             "system_instruction": {"parts": [{"text": system}]},
@@ -127,17 +135,18 @@ Exemplos de "Inteligência":
                                     "mode": mode,
                                     "user_request": prompt,
                                     "current_presence": current.to_dict() if current else {},
+                                    "recent_memory": memory[-6:],
                                 },
                                 ensure_ascii=False,
                             )
-                        },
-                    ]
+                        }
+                    ],
                 }
             ],
             "generationConfig": {
-                "temperature": 0.75,
-                "topP": 0.95,
-                "maxOutputTokens": 1024,
+                "temperature": 0.7,
+                "topP": 0.9,
+                "maxOutputTokens": 900,
                 "responseMimeType": "application/json",
             },
         }
@@ -164,7 +173,7 @@ Exemplos de "Inteligência":
         buttons = []
         for item in data.get("buttons", []):
             if isinstance(item, dict):
-                buttons.append(PresenceButton(str(item.get("label", ""))[:32], str(item.get("url", ""))))
+                buttons.append(PresenceButton(self._limit(item.get("label", ""), 32), str(item.get("url", ""))))
         while len(buttons) < 2:
             buttons.append(PresenceButton())
 
@@ -179,210 +188,245 @@ Exemplos de "Inteligência":
             large_text=self._limit(data.get("large_text", ""), 80),
             small_image=self._limit(data.get("small_image", ""), 64),
             small_text=self._limit(data.get("small_text", ""), 80),
-            rotating_phrases=[self._limit(str(item), 80) for item in phrases if str(item).strip()][:8],
+            rotating_phrases=[self._limit(item, 80) for item in phrases if str(item).strip()][:8],
             buttons=buttons[:2],
             mood=self._limit(data.get("mood", "cyberpunk"), 32),
         )
 
-    def _fallback(self, prompt: str, mood: str, mode: str, current: PresenceConfig | None) -> PresenceConfig:
-        intent = self._analyze(prompt, mood, mode, current)
-        profile = self._profiles()[intent.mood]
+    def _fallback(
+        self,
+        prompt: str,
+        mood: str,
+        mode: str,
+        current: PresenceConfig | None,
+        memory: list[dict[str, str]],
+    ) -> PresenceConfig:
+        parsed = self._parse_request(prompt, mood, mode, current, memory)
+        base = self._profiles()[parsed.mood]
 
-        details = self._details_for(intent, profile, current)
-        state = self._state_for(intent, profile, current)
-        if mode == "phrases":
-            details = current.details if current and current.details else details
-            state = current.state if current and current.state else state
-        if mode == "improve" and current:
-            details = self._polish(current.details or details, intent)
-            state = self._polish(current.state or state, intent, secondary=True)
+        details = self._details(parsed, current)
+        state = self._state(parsed, current)
+        phrases = self._phrases(parsed)
+
+        if mode == "phrases" and current:
+            details = current.details or details
+            state = current.state or state
+        if parsed.action == "improve" and current:
+            details = self._improve_line(current.details or details, parsed, primary=True)
+            state = self._improve_line(current.state or state, parsed, primary=False)
 
         return PresenceConfig(
             details=details,
             state=state,
-            large_image=profile["large_image"],
-            large_text=profile["large_text"],
+            large_image=base["large_image"],
+            large_text=base["large_text"],
             small_image="studio_small",
             small_text="Online no Presence Studio",
-            rotating_phrases=self._phrases(intent, profile),
-            buttons=self._buttons(intent),
-            mood=intent.mood,
+            rotating_phrases=phrases,
+            buttons=self._buttons(parsed),
+            mood=parsed.mood,
         )
 
-    def _analyze(self, prompt: str, default_mood: str, mode: str, current: PresenceConfig | None) -> Intent:
-        text = self._normalize(prompt)
-        mood_scores = {
-            "dev": ["cod", "program", "python", "node", "api", "debug", "terminal", "github", "vscode", "backend", "frontend"],
-            "study": ["estud", "aula", "prova", "faculdade", "escola", "leitura", "pesquisa", "curso", "aprend"],
-            "gaming": ["jog", "game", "valorant", "league of legends", "lol", "ranked", "partida", "minecraft", "steam", "cs2", "roblox", "tiro", "morte", "morrendo", "pvp", "fps"],
-            "music": ["musica", "spotify", "playlist", "ouvindo", "som", "beat", "album"],
-            "professional": ["profissional", "trabalho", "cliente", "reuniao", "projeto", "produtiv", "freela"],
-            "dark": ["dark", "sombrio", "minimal", "preto", "serio"],
-            "funny": ["meme", "shitpost", "engrac", "zoeira", "caos", "burro", "idiota", "lixo"],
-            "cyberpunk": ["cyber", "neon", "futur", "hacker", "terminal"],
-        }
-        mood = current.mood if current and current.mood else (default_mood or "cyberpunk")
-        best_score = 0
-        for candidate, words in mood_scores.items():
-            score = sum(1 for word in words if word in text)
-            if score > best_score:
-                best_score = score
-                mood = candidate
+    def _parse_request(
+        self,
+        prompt: str,
+        default_mood: str,
+        mode: str,
+        current: PresenceConfig | None,
+        memory: list[dict[str, str]],
+    ) -> ParsedRequest:
+        normalized = self._normalize(prompt)
+        remembered_subject = self._last_subject(memory) or (current.details if current else "")
+        subject = self._extract_subject(prompt) or remembered_subject
+        if self._normalize(subject) in {"isso", "isto", "essa", "esse", "atual", "deixa isso", "melhora isso"}:
+            subject = remembered_subject
+        mood = self._detect_mood(normalized, default_mood, current, subject)
+        style = self._detect_style(normalized)
 
         if mode == "phrases":
             action = "phrases"
-        elif mode == "improve" or any(word in text for word in ["melhor", "refina", "deixa mais bonito", "aprimora"]):
+        elif mode == "improve" or any(word in normalized for word in ["melhor", "aprimora", "refina", "mais bonito", "menos generico"]):
             action = "improve"
-        elif any(word in text for word in ["descricao", "details", "linha principal"]):
+        elif any(word in normalized for word in ["descricao", "details", "linha principal"]):
             action = "details"
-        elif any(word in text for word in ["estado", "status", "state", "linha secundaria"]):
+        elif any(word in normalized for word in ["estado", "status", "state", "linha secundaria"]):
             action = "state"
         else:
             action = "generate"
 
-        style = "clean"
-        if any(word in text for word in ["profissional", "serio", "clean", "limpo"]):
-            style = "professional"
-        elif any(word in text for word in ["engrac", "meme", "shitpost", "zoeira", "imbecil", "idiota", "tosco", "zoado"]):
-            style = "funny"
-        elif any(word in text for word in ["dark", "sombrio", "minimal"]):
-            style = "dark"
-        elif any(word in text for word in ["cyber", "neon", "futur"]):
-            style = "cyberpunk"
-
-        topic = self._extract_topic(prompt)
-        return Intent(mood=mood if mood in self._profiles() else "cyberpunk", topic=topic, action=action, style=style)
+        return ParsedRequest(
+            request=prompt,
+            subject=self._clean_subject(subject),
+            mood=mood,
+            style=style,
+            action=action,
+            memory=memory[-6:] if isinstance(memory, list) else [],
+        )
 
     def _profiles(self) -> dict[str, dict[str, str]]:
         return {
-            "dev": {"details": "Codando no modo foco", "state": "APIs | Debug | Build", "large_image": "code", "large_text": "Ambiente dev ativo"},
-            "study": {"details": "Estudando com foco", "state": "Pesquisa | Notas | Evolucao", "large_image": "study", "large_text": "Modo estudo"},
-            "gaming": {"details": "Jogando uma partida", "state": "Fila ativa | GG", "large_image": "game", "large_text": "Modo gamer"},
-            "music": {"details": "Ouvindo musica", "state": "Playlist ligada | Vibe boa", "large_image": "music", "large_text": "Som ambiente"},
-            "professional": {"details": "Trabalhando em projeto", "state": "Planejamento | Execucao", "large_image": "work", "large_text": "Modo profissional"},
-            "cyberpunk": {"details": "Cyber Terminal", "state": "Neon | IA | Discord RPC", "large_image": "cyber", "large_text": "Modo neon"},
-            "dark": {"details": "Modo dark ativado", "state": "Foco silencioso | Minimal", "large_image": "dark", "large_text": "Dark workspace"},
-            "funny": {"details": "Compilando ideias suspeitas", "state": "Caos controlado | 0 bugs talvez", "large_image": "meme", "large_text": "Modo shitpost"},
+            "dev": {"large_image": "code", "large_text": "Ambiente dev ativo"},
+            "study": {"large_image": "study", "large_text": "Modo estudo"},
+            "gaming": {"large_image": "game", "large_text": "Modo gamer"},
+            "music": {"large_image": "music", "large_text": "Som ambiente"},
+            "professional": {"large_image": "work", "large_text": "Modo profissional"},
+            "cyberpunk": {"large_image": "cyber", "large_text": "Modo neon"},
+            "dark": {"large_image": "dark", "large_text": "Dark workspace"},
+            "funny": {"large_image": "meme", "large_text": "Modo shitpost"},
         }
 
-    def _details_for(self, intent: Intent, profile: dict[str, str], current: PresenceConfig | None) -> str:
-        topic = intent.topic
-        if intent.action == "state" and current and current.details:
-            return current.details
-        if topic:
-            if intent.mood == "gaming":
-                funny_games = {
-                    "League of Legends": "Perdendo PDL no LoL",
-                    "Valorant": "Errando pixel no Valorant",
-                    "Minecraft": "Minerando sem plano",
-                    "Roblox": "Aprontando no Roblox",
-                    "Steam": "Comprando jogo que nao vou zerar",
-                    "morto a tiros": "Virando saudade no mapa",
-                }
-                if intent.style == "funny" or "morto" in topic:
-                    return self._limit(funny_games.get(topic, f"Sendo derrotado em {topic}"), 80)
-            templates = {
-                "dev": f"Codando {topic}",
-                "study": f"Estudando {topic}",
-                "gaming": f"Jogando {topic}",
-                "music": f"Ouvindo {topic}",
-                "professional": f"Trabalhando em {topic}",
-                "funny": f"Sobrevivendo a {topic}",
-            }
-            return self._limit(templates.get(intent.mood, topic.capitalize()), 80)
-        return profile["details"]
-
-    def _state_for(self, intent: Intent, profile: dict[str, str], current: PresenceConfig | None) -> str:
-        if intent.action == "details" and current and current.state:
-            return current.state
-        states = {
-            "dev": "Python | APIs | Debug",
-            "study": "Foco total | Aprendizado",
-            "gaming": "Partida em andamento",
-            "music": "Playlist ligada | Vibe boa",
-            "professional": "Organizando ideias em entrega",
-            "cyberpunk": "Discord RPC | IA | Neon",
-            "dark": "Foco silencioso | Dark mode",
-            "funny": "Bug nenhum, confia",
+    def _detect_mood(self, text: str, default_mood: str, current: PresenceConfig | None, subject: str) -> str:
+        haystack = f"{text} {self._normalize(subject)}"
+        scores = {
+            "dev": ["cod", "program", "python", "node", "api", "debug", "github", "vscode", "backend", "frontend"],
+            "study": ["estud", "aula", "prova", "faculdade", "pesquisa", "curso", "aprend"],
+            "gaming": ["jog", "game", "league of legends", "lol", "valorant", "minecraft", "steam", "ranked", "partida", "fps"],
+            "music": ["musica", "spotify", "playlist", "ouvindo", "album"],
+            "professional": ["profissional", "formal", "trabalho", "cliente", "reuniao", "projeto", "produtiv"],
+            "dark": ["dark", "sombrio", "minimal", "preto"],
+            "cyberpunk": ["cyber", "neon", "futur", "hacker"],
+            "funny": ["meme", "shitpost", "engrac", "hilario", "zoeira", "imbecil", "tosco", "zoado", "burro"],
         }
-        if intent.mood == "gaming" and (intent.style == "funny" or "morto" in (intent.topic or "")):
-            return "SoloQ mentalmente estavel"
-        return states.get(intent.mood, profile["state"])
+        mood = "cyberpunk"
+        best = 0
+        for candidate, words in scores.items():
+            score = sum(1 for word in words if word in haystack)
+            if score > best:
+                best = score
+                mood = candidate
+        funny_formal = any(word in haystack for word in ["engrac", "hilario", "meme", "zoeira"]) and any(
+            word in haystack for word in ["formal", "profissional", "serio"]
+        )
+        domain_words = scores["dev"] + scores["study"] + scores["gaming"] + scores["music"]
+        if funny_formal and not any(word in haystack for word in domain_words):
+            mood = "funny"
+        if any(word in haystack for word in ["fofo", "fofa", "fofinha", "fofuxa", "cute", "carinho", "meigo"]) and not any(
+            word in haystack for word in domain_words
+        ):
+            mood = "funny"
+        if best == 0 and self._is_contextual_request(text):
+            mood = current.mood if current and current.mood else (default_mood or "cyberpunk")
+        if mood == "funny" and any(word in haystack for word in scores["gaming"]):
+            return "gaming"
+        return mood if mood in self._profiles() else "cyberpunk"
 
-    def _phrases(self, intent: Intent, profile: dict[str, str]) -> list[str]:
-        phrase_bank = {
-            "dev": ["Debugando o impossivel", "Buildando sem travar o PC", "Commitando progresso", "Transformando cafe em codigo"],
-            "study": ["Revisando com calma", "Mais uma pagina vencida", "Aprendizado em andamento", "Foco antes da recompensa"],
-            "gaming": ["Fila puxada", "GG em construcao", "Partida em andamento", "Modo clutch ativado"],
-            "music": ["Playlist no ponto", "Volume mental ajustado", "Vibe em loop", "Som ligado, foco tambem"],
-            "professional": ["Planejando a entrega", "Modo produtividade", "Organizando prioridades", "Construindo com calma"],
-            "cyberpunk": ["Neon ligado", "Terminal respirando", "IA no painel", "Cidade acordada"],
-            "dark": ["Foco no escuro", "Minimal e direto", "Silencio produtivo", "Dark mode permanente"],
-            "funny": ["Compilando desculpas", "Zero bugs na imaginacao", "Deploy da bagunca", "Caos com estilo"],
-        }
-        phrases = phrase_bank.get(intent.mood, [profile["details"], profile["state"]])
-        if intent.mood == "gaming" and (intent.style == "funny" or "morto" in (intent.topic or "")):
-            topic = intent.topic or "o jogo"
-            phrases = [
-                f"Sofrendo em {topic}",
-                "Culpando o matchmaking",
-                "Prometi jogar serio",
-                "GG moral em andamento",
-                "Meu time acredita, eu nao",
-            ]
-        elif intent.topic:
-            phrases = [f"{intent.topic}", *phrases]
-        return [self._limit(item, 80) for item in phrases[:6]]
+    def _detect_style(self, text: str) -> str:
+        wants_funny = any(word in text for word in ["engrac", "hilario", "meme", "shitpost", "zoeira", "imbecil", "idiota", "tosco", "zoado", "burro"])
+        wants_formal = any(word in text for word in ["profissional", "formal", "serio", "clean", "limpo"])
+        wants_cute = any(word in text for word in ["fofo", "fofa", "fofinha", "fofuxa", "cute", "carinho", "meigo", "meiga"])
+        wants_conceptual = any(word in text for word in ["conceitual", "conceito", "poetico", "poetica", "estetico", "estetica"])
+        if wants_cute and wants_conceptual:
+            return "cute_conceptual"
+        if wants_cute:
+            return "cute"
+        if wants_conceptual:
+            return "conceptual"
+        if wants_funny and wants_formal:
+            return "formal_funny"
+        if wants_funny:
+            return "funny"
+        if wants_formal:
+            return "professional"
+        if any(word in text for word in ["dark", "sombrio", "minimal"]):
+            return "dark"
+        if any(word in text for word in ["cyber", "neon", "futur"]):
+            return "cyberpunk"
+        return "clean"
 
-    def _buttons(self, intent: Intent) -> list[PresenceButton]:
-        if intent.mood == "dev":
-            return [PresenceButton("GitHub", "https://github.com/"), PresenceButton("Projeto", "https://example.com/")]
-        return [PresenceButton(), PresenceButton()]
+    def _is_contextual_request(self, text: str) -> bool:
+        return any(word in text for word in ["isso", "isto", "essa", "esse", "atual", "melhora", "refina", "troca so"])
 
-    def _extract_topic(self, prompt: str) -> str:
-        known = self._known_topic(prompt)
+    def _extract_subject(self, prompt: str) -> str:
+        known = self._known_subject(prompt)
         if known:
             return known
 
         text = prompt.strip()
-        cleanup = [
-            r"\bcoloque que estou sendo\b", r"\bcoloque que estou\b",
-            r"\bcoloque que\b", r"\bcoloque\b", r"\bcolocar\b",
-            r"\bestou sendo\b", r"\bestou\b", r"\beu estou\b",
-            r"\bdeixa que eu\b", r"\bmuda pra\b", r"\baltera pra\b",
-            r"\bcoloque de uma forma\b", r"\bde uma forma\b", r"\bforma\b",
-            r"\bimbecil\b", r"\bidiota\b", r"\btosca?\b", r"\bzoada?\b",
-            r"\bquero que\b", r"\bpor favor\b", r"\bative\b", r"\bativar\b", r"\bconecte\b",
-            r"\bconectar\b", r"\bcoloca(?:r)?\b", r"\baparecer\b", r"\bno meu perfil\b",
-            r"\bperfil\b", r"\brich presence\b", r"\bpresence\b", r"\bpresen[cç]a\b",
-            r"\bdeixando\b", r"\bdeixar\b", r"\bagora\b",
-            r"\bdiscord\b", r"\bmuda(?:r)?\b", r"\baltera(?:r)?\b", r"\bdescri[cç][aã]o\b",
-            r"\bdetails\b", r"\bfaz(?:er)?\b", r"\bgera(?:r)?\b", r"\bfrases?\b",
-            r"\brotativas?\b", r"\bpra\b", r"\bpara\b", r"\bprofissional\b",
-            r"\bcyberpunk\b", r"\bcyber\b", r"\bque\b", r"\bjogando\b",
-        ]
-        for pattern in cleanup:
-            text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s+", " ", text).strip(" ,.-")
-        text = re.sub(r"^(a|o|um|uma)\s+", "", text, flags=re.IGNORECASE).strip()
-        if len(text) < 3:
-            return ""
-        lowered = self._normalize(text)
-        if "codando" in lowered or "programando" in lowered:
-            return "no VS Code"
-        if "trabalhando em " in lowered:
-            return re.split(r"trabalhando em\s+", text, flags=re.IGNORECASE, maxsplit=1)[-1].strip() or "projeto"
-        if "estudando " in lowered:
-            return re.split(r"estudando\s+", text, flags=re.IGNORECASE, maxsplit=1)[-1].strip() or "com foco"
-        aliases = {
-            "codando": "no VS Code",
-            "programando": "no VS Code",
-            "estudando": "com foco",
-            "ouvindo musica": "uma playlist",
-        }
-        return aliases.get(lowered, text[:60])
+        text = self._strip_tail_instructions(text)
+        normalized_text = self._normalize(text)
 
-    def _known_topic(self, prompt: str) -> str:
+        transform_match = re.search(
+            r"(?:transforme|transforma|deixe|deixa|torne|torna)\s+(?:a\s+)?(?:rich\s*)?(?:presence|presenca|presensce)?\s*(.+?)\s+em\s+algo",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
+        if transform_match:
+            return transform_match.group(1).strip()
+
+        claim_match = re.search(
+            r"(?:fale|fala|diga|mostre|coloque|coloca|bote|bota|falando)\s+que\s+(.+)",
+            normalized_text,
+            flags=re.IGNORECASE,
+        )
+        if claim_match:
+            return claim_match.group(1)
+
+        patterns = [
+            r"(?:codando|programando)\s+(.+)",
+            r"(?:falando|fale|fala)\s+(?:que\s+)?(.+)",
+            r"(?:coloque|coloca|bote|bota|diga|mostre)\s+(?:que\s+)?(.+)",
+            r"(?:estou|to|tô|tou)\s+(.+)",
+            r"(?:sobre|pra|para)\s+(.+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized_text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return normalized_text
+
+    def _strip_tail_instructions(self, value: str) -> str:
+        tails = [
+            " porem ",
+            " mas ",
+            " so que ",
+            " mais engracado",
+            " mais fofo",
+            " mais fofa",
+            " modo mais fofo",
+            " de um modo ",
+            " de uma forma ",
+            " de forma ",
+            " soq ",
+            " do que a forma",
+        ]
+        text = self._normalize(value)
+        for pattern in tails:
+            index = text.find(pattern)
+            if index >= 0:
+                text = text[:index]
+        text = text.strip(" ,.-")
+        return text
+
+    def _clean_subject(self, subject: str) -> str:
+        text = subject.strip()
+        text = self._normalize(text)
+        known = {
+            "league of legends": "League of Legends",
+            "valorant": "Valorant",
+            "minecraft": "Minecraft",
+            "roblox": "Roblox",
+            "steam": "Steam",
+            "spotify": "Spotify",
+            "python": "Python",
+            "node.js": "Node.js",
+            "vs code": "VS Code",
+        }
+        if text in known:
+            return known[text]
+        text = re.sub(r"\b(ative|ativar|conecte|conectar|rich\s*presensce|rich\s*presence|rich\s*presenca|presenca|discord|perfil)\b", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(coloque|coloca|bote|bota|diga|mostre|fale|fala|falando|transforme|transforma|deixe|deixa|melhora|isso|isto|que|eu|estou|to|tou|tô|sendo|uma|um|a|o)\b", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b(fofinha|fofuxa|fofo|fofa|cute|carinho|meigo|meiga|conceitual|conceito|modo|forma|soq|de)\b", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ,.-")
+        match = re.match(r"(.+?)\s+(?:e|eh|esta|ta)\s+(.+)", text)
+        if match:
+            left = self._title_case(match.group(1))
+            right = match.group(2).strip()
+            if any(word in right for word in ["fofinha", "fofuxa", "fofo", "fofa", "cute", "carinho", "meigo", "meiga"]):
+                return left
+            return f"{left} {right}".strip()
+        return self._title_case(text) if len(text) <= 26 else text[:60]
+
+    def _known_subject(self, prompt: str) -> str:
         text = self._normalize(prompt)
         topics = [
             ("league of legends", "League of Legends"),
@@ -391,39 +435,202 @@ Exemplos de "Inteligência":
             ("valorant", "Valorant"),
             ("minecraft", "Minecraft"),
             ("roblox", "Roblox"),
-            ("counter strike", "Counter-Strike 2"),
-            ("cs2", "Counter-Strike 2"),
             ("steam", "Steam"),
             ("spotify", "Spotify"),
-            ("vscode", "VS Code"),
-            ("vs code", "VS Code"),
             ("python", "Python"),
             ("node", "Node.js"),
+            ("vscode", "VS Code"),
+            ("vs code", "VS Code"),
         ]
         for needle, label in topics:
             if needle in text:
                 return label
         return ""
 
-    def _polish(self, value: str, intent: Intent, secondary: bool = False) -> str:
+    def _last_subject(self, memory: list[dict[str, str]]) -> str:
+        if not isinstance(memory, list):
+            return ""
+        for item in reversed(memory):
+            if isinstance(item, dict):
+                value = item.get("details") or item.get("subject") or ""
+                if value:
+                    return value
+        return ""
+
+    def _details(self, parsed: ParsedRequest, current: PresenceConfig | None) -> str:
+        if parsed.action == "state" and current and current.details:
+            return current.details
+        subject = parsed.subject
+        funny = parsed.style == "funny"
+
+        if parsed.style in {"cute", "cute_conceptual"}:
+            return self._limit(self._cute_detail(subject, conceptual=parsed.style == "cute_conceptual"), 80)
+        if parsed.style == "conceptual":
+            return self._limit(f"{subject} em conceito aberto" if subject else "Presenca em conceito aberto", 80)
+        if parsed.mood == "funny":
+            if parsed.style in {"professional", "formal_funny"}:
+                return self._limit(f"{subject} em comunicado oficial" if subject else "Comunicado oficial do caos", 80)
+            return self._limit(f"{subject} virou evento oficial" if subject else "Compilando caos", 80)
+        if parsed.mood == "gaming":
+            if funny:
+                return self._limit(self._funny_gaming_detail(subject), 80)
+            return self._limit(f"Jogando {subject}" if subject else "Partida em andamento", 80)
+        if parsed.mood == "dev":
+            return self._limit(f"Codando {subject}" if subject else "Codando no modo foco", 80)
+        if parsed.mood == "study":
+            return self._limit(f"Estudando {subject}" if subject else "Estudando com foco", 80)
+        if parsed.mood == "music":
+            return self._limit(f"Ouvindo {subject}" if subject else "Ouvindo musica", 80)
+        if parsed.mood == "professional":
+            return self._limit(f"Trabalhando em {subject}" if subject else "Trabalhando em projeto", 80)
+        if parsed.mood == "dark":
+            return self._limit(subject or "Modo dark ativado", 80)
+        if parsed.mood == "cyberpunk":
+            return self._limit(subject or "Cyber Terminal", 80)
+        return self._limit(subject or "Presence Studio", 80)
+
+    def _state(self, parsed: ParsedRequest, current: PresenceConfig | None) -> str:
+        if parsed.action == "details" and current and current.state:
+            return current.state
+        subject = parsed.subject
+        if parsed.style == "cute":
+            return "Carinho aplicado ao status"
+        if parsed.style == "cute_conceptual":
+            return "Ternura em forma de conceito"
+        if parsed.style == "conceptual":
+            return "Ideia em exibicao"
+        if parsed.mood == "funny" and parsed.style in {"professional", "formal_funny"}:
+            return "Formalmente sem condicoes"
+        if parsed.mood == "gaming" and parsed.style == "funny":
+            return "Humor duvidoso, farm garantido"
+        states = {
+            "gaming": "Partida em andamento",
+            "dev": "Debug | Build | Commit",
+            "study": "Foco total | Aprendizado",
+            "music": "Playlist ligada | Vibe boa",
+            "professional": "Planejamento | Execucao",
+            "cyberpunk": "Neon | IA | Discord RPC",
+            "dark": "Foco silencioso | Dark mode",
+            "funny": "Zero contexto, muita conviccao",
+        }
+        if subject and parsed.style == "professional":
+            return self._limit(f"Organizando {subject.lower()}", 80)
+        return states.get(parsed.mood, "Online no Presence Studio")
+
+    def _funny_gaming_detail(self, subject: str) -> str:
+        normalized = self._normalize(subject)
+        if "brenda" in normalized and "farm" in normalized:
+            return "Brenda farmou ate o Discord"
+        if "league of legends" in normalized:
+            return "Perdendo PDL no LoL"
+        if "valorant" in normalized:
+            return "Errando pixel no Valorant"
+        if "minecraft" in normalized:
+            return "Minerando com zero plano"
+        if subject:
+            return f"{subject} em modo absurdo"
+        return "Jogando como se fosse estrategia"
+
+    def _cute_detail(self, subject: str, conceptual: bool = False) -> str:
+        name = self._primary_name(subject) or "Essa energia"
+        if conceptual:
+            return f"{name}, conceito de ternura"
+        return f"{name} em modo carinho"
+
+    def _phrases(self, parsed: ParsedRequest) -> list[str]:
+        subject = parsed.subject or "o momento"
+        if parsed.style in {"cute", "cute_conceptual"}:
+            name = self._primary_name(subject) or subject
+            phrases = [
+                f"{name} com aura de abraço",
+                "Fofura calibrada no maximo",
+                "Modo carinho ativado",
+                "Status macio e brilhando",
+            ]
+            if parsed.style == "cute_conceptual":
+                phrases = [
+                    f"{name} como ideia bonita",
+                    "Ternura em formato abstrato",
+                    "Conceito: carinho aplicado",
+                    "Um manifesto pequeno de fofura",
+                ]
+        elif parsed.style == "conceptual":
+            phrases = [
+                f"{subject} em leitura conceitual",
+                "Ideia virando status",
+                "Estetica antes da explicacao",
+                "Presenca como pequena tese",
+            ]
+        elif parsed.mood == "funny" and parsed.style in {"professional", "formal_funny"}:
+            phrases = [
+                f"{subject} em ata oficial",
+                "Comunicado serio sobre bobagem",
+                "Formalidade com zero estabilidade",
+                "Departamento de caos informa",
+            ]
+        elif parsed.mood == "gaming" and parsed.style == "funny":
+            if "brenda" in self._normalize(subject):
+                phrases = [
+                    "Brenda farmada, bot lane traumatizada",
+                    "O minion viu e pediu pausa",
+                    "Carry moral em andamento",
+                    "Reportaram o senso de humor",
+                ]
+            else:
+                phrases = [
+                    f"Sofrendo em {subject}",
+                    "Culpando o matchmaking",
+                    "Prometi jogar serio",
+                    "GG moral em andamento",
+                ]
+        else:
+            bank = {
+                "dev": [f"Construindo {subject}", "Debugando sem panico", "So mais um commit", "Build quase verde"],
+                "study": [f"Revisando {subject}", "Foco antes da recompensa", "Mais uma pagina vencida", "Aprendizado em andamento"],
+                "gaming": [f"Jogando {subject}", "Fila puxada", "Partida em andamento", "Modo clutch ativado"],
+                "music": [f"Ouvindo {subject}", "Playlist no ponto", "Volume mental ajustado", "Vibe em loop"],
+                "professional": [f"Organizando {subject}", "Modo produtividade", "Prioridades alinhadas", "Entrega em construcao"],
+                "cyberpunk": ["Neon ligado", "Terminal respirando", "IA no painel", "Cidade acordada"],
+                "dark": ["Foco no escuro", "Minimal e direto", "Silencio produtivo", "Dark mode permanente"],
+                "funny": [f"{subject} virou lore", "Caos com estilo", "Zero bugs na imaginacao", "Deploy da bagunca"],
+            }
+            phrases = bank.get(parsed.mood, [subject, "Online no Presence Studio"])
+        return [self._limit(item, 80) for item in phrases[:6]]
+
+    def _improve_line(self, value: str, parsed: ParsedRequest, primary: bool) -> str:
         value = value.strip()
         if not value:
-            return self._state_for(intent, self._profiles()[intent.mood], None) if secondary else self._details_for(intent, self._profiles()[intent.mood], None)
-        if intent.style == "professional":
-            prefix = "Foco em" if secondary else "Trabalhando em"
-            return self._limit(f"{prefix} {value.lower()}", 80)
-        if intent.style == "funny":
-            return self._limit(f"{value} | sem prometer estabilidade", 80)
-        if intent.style == "cyberpunk":
+            return self._details(parsed, None) if primary else self._state(parsed, None)
+        if parsed.style == "funny":
+            return self._limit(f"{value} | agora com lore", 80)
+        if parsed.style == "professional":
+            return self._limit(f"{'Foco em' if primary else 'Execucao de'} {value.lower()}", 80)
+        if parsed.style == "cyberpunk":
             return self._limit(f"{value} | modo neon", 80)
         return self._limit(value[0].upper() + value[1:], 80)
 
+    def _buttons(self, parsed: ParsedRequest) -> list[PresenceButton]:
+        if parsed.mood == "dev":
+            return [PresenceButton("GitHub", "https://github.com/"), PresenceButton("Projeto", "https://example.com/")]
+        return [PresenceButton(), PresenceButton()]
+
+    def _primary_name(self, subject: str) -> str:
+        text = self._clean_subject(subject)
+        text = re.sub(r"\b(e|eh|esta|ta)\b.*$", "", self._normalize(text)).strip()
+        return self._title_case(text)
+
+    def _title_case(self, value: str) -> str:
+        small = {"de", "da", "do", "das", "dos", "e", "em", "no", "na"}
+        words = []
+        for index, word in enumerate(value.split()):
+            lowered = word.lower()
+            words.append(lowered if index and lowered in small else lowered.capitalize())
+        return " ".join(words)
+
     def _normalize(self, value: str) -> str:
-        value = value.lower()
-        replacements = {"ç": "c", "á": "a", "à": "a", "ã": "a", "â": "a", "é": "e", "ê": "e", "í": "i", "ó": "o", "ô": "o", "õ": "o", "ú": "u"}
-        for src, dst in replacements.items():
-            value = value.replace(src, dst)
-        return value
+        value = str(value or "").lower()
+        normalized = unicodedata.normalize("NFKD", value)
+        return "".join(char for char in normalized if not unicodedata.combining(char))
 
     def _limit(self, value: Any, max_len: int) -> str:
         text = str(value or "").strip()
